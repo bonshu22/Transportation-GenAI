@@ -1,0 +1,863 @@
+import React, { useEffect, useRef, useState } from 'react';
+import maplibregl from 'maplibre-gl';
+import 'maplibre-gl/dist/maplibre-gl.css';
+import './TomTomMap.css'; // Import the new CSS file
+
+const TOMTOM_API_KEY = process.env.REACT_APP_TOMTOM_API_KEY;
+
+const TomTomMap = () => {
+  const [pickIndex, setPickIndex] = useState(null); // which input is picking on map
+  const pickIndexRef = useRef(null);
+  useEffect(() => { pickIndexRef.current = pickIndex; }, [pickIndex]);
+  const mapContainer = useRef(null);
+  const mapInstance = useRef(null);
+  const [search, setSearch] = useState('');
+  const [suggestions, setSuggestions] = useState([]);
+  const [isFocused, setIsFocused] = useState(false);
+  // Route planner panel state
+  const [plannerOpen, setPlannerOpen] = useState(false);
+  const [routeInputs, setRouteInputs] = useState([
+    { value: '', suggestions: [], coords: null }, // Start
+    { value: '', suggestions: [], coords: null }, // First destination
+  ]);
+  const [mode, setMode] = useState('car');
+  const [isEnterpriseMode, setIsEnterpriseMode] = useState(false);
+  const [truckSpecs, setTruckSpecs] = useState({
+    weight: '15000', // kg
+    height: '4.0',   // meters
+    width: '2.5',    // meters
+    length: '12.0'   // meters
+  });
+  const [fuelCapacity, setFuelCapacity] = useState('');
+  const [mileage, setMileage] = useState('');
+  const [currentFuel, setCurrentFuel] = useState('');
+  
+  // Simulation state
+  const [isSimulating, setIsSimulating] = useState(false);
+  const [simulationProgress, setSimulationProgress] = useState(0);
+  const simulationMarkerRef = useRef(null);
+  const simulationIntervalRef = useRef(null);
+  
+  // Autocomplete for route planner fields
+  const handleRouteInputChange = async (idx, value) => {
+    setRouteInputs((prev) => prev.map((f, i) => i === idx ? { ...f, value, coords: null } : f));
+    if (value.length < 3) {
+      setRouteInputs((prev) => prev.map((f, i) => i === idx ? { ...f, suggestions: [] } : f));
+      return;
+    }
+    try {
+      const endpoint = `https://api.tomtom.com/search/2/search/${encodeURIComponent(value)}.json?key=${TOMTOM_API_KEY}&limit=5&typeahead=true`;
+      const res = await fetch(endpoint);
+      const data = await res.json();
+      setRouteInputs((prev) => prev.map((f, i) => i === idx ? { ...f, suggestions: data.results || [] } : f));
+    } catch {
+      setRouteInputs((prev) => prev.map((f, i) => i === idx ? { ...f, suggestions: [] } : f));
+    }
+  };
+
+  const handleRouteSuggestionClick = (idx, suggestion) => {
+    setRouteInputs((prev) => prev.map((f, i) => i === idx ? {
+      ...f,
+      value: suggestion.address.freeformAddress,
+      coords: [suggestion.position.lon, suggestion.position.lat],
+      suggestions: [],
+    } : f));
+  };
+
+  const handleAddDestination = () => {
+    setRouteInputs((prev) => [...prev, { value: '', suggestions: [], coords: null }]);
+  };
+
+  const handleRemoveDestination = (idx) => {
+    if (routeInputs.length <= 2) return;
+    setRouteInputs((prev) => prev.filter((_, i) => i !== idx));
+  };
+  const [userLocation, setUserLocation] = useState(null);
+  const [points, setPoints] = useState([]); // [start, ...destinations]
+  const [routeGeoJson, setRouteGeoJson] = useState(null);
+  const [showUserArrow, setShowUserArrow] = useState(false);
+  const [showTraffic, setShowTraffic] = useState(false);
+  const [routeInstructions, setRouteInstructions] = useState([]);
+  const [routeSummary, setRouteSummary] = useState(null); // { distance, time }
+
+  useEffect(() => {
+    if (!mapContainer.current) {
+      return;
+    }
+    if (mapInstance.current) {
+      return;
+    }
+    let defaultCenter = [77.5946, 12.9716]; // Bangalore
+    let map;
+    const initializeMap = (center) => {
+      map = new maplibregl.Map({
+        container: mapContainer.current,
+        style: {
+          version: 8,
+          sources: {
+            tomtom: {
+              type: 'raster',
+              tiles: [
+                `https://api.tomtom.com/map/1/tile/basic/main/{z}/{x}/{y}.png?key=${TOMTOM_API_KEY}`
+              ],
+              tileSize: 256,
+              attribution: '© TomTom',
+            },
+          },
+          layers: [
+            {
+              id: 'tomtom-tiles',
+              type: 'raster',
+              source: 'tomtom',
+              minzoom: 0,
+              maxzoom: 22,
+            },
+          ],
+        },
+        center,
+        zoom: 10,
+      });
+      map.on('error', (e) => {
+        console.error('MapLibre error:', e);
+      });
+      map.on('click', async (e) => {
+        if (pickIndexRef.current !== null) {
+          const idx = pickIndexRef.current;
+          const lngLat = [e.lngLat.lng, e.lngLat.lat];
+          // Reverse geocode to get address
+          try {
+            const endpoint = `https://api.tomtom.com/search/2/reverseGeocode/${lngLat[1]},${lngLat[0]}.json?key=${TOMTOM_API_KEY}`;
+            const res = await fetch(endpoint);
+            const data = await res.json();
+            let address = `${lngLat[1].toFixed(6)}, ${lngLat[0].toFixed(6)}`;
+            if (data.addresses && data.addresses[0] && data.addresses[0].address && data.addresses[0].address.freeformAddress) {
+              address = data.addresses[0].address.freeformAddress;
+            }
+            setRouteInputs((prev) => prev.map((f, i) => i === idx ? { ...f, coords: lngLat, value: address, suggestions: [] } : f));
+          } catch {
+            setRouteInputs((prev) => prev.map((f, i) => i === idx ? { ...f, coords: lngLat, value: `${lngLat[1].toFixed(6)}, ${lngLat[0].toFixed(6)}`, suggestions: [] } : f));
+          }
+          setPickIndex(null);
+        }
+      });
+      mapInstance.current = map;
+    };
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        (position) => {
+          const userCenter = [position.coords.longitude, position.coords.latitude];
+          setUserLocation(userCenter);
+          initializeMap(userCenter);
+        },
+        (error) => {
+          console.warn('Geolocation error:', error);
+          initializeMap(defaultCenter);
+        }
+      );
+    } else {
+      initializeMap(defaultCenter);
+    }
+
+    // Cleanup suggestions on unmount
+    return () => {
+      setSuggestions([]);
+      if (simulationIntervalRef.current) {
+        clearInterval(simulationIntervalRef.current);
+      }
+      if (mapInstance.current) {
+        mapInstance.current.remove();
+        mapInstance.current = null;
+      }
+    };
+  }, []);
+
+  // TomTom Autocomplete API
+  const handleSearchChange = async (e) => {
+    const value = e.target.value;
+    setSearch(value);
+    if (value.length < 3) {
+      setSuggestions([]);
+      return;
+    }
+    try {
+      const endpoint = `https://api.tomtom.com/search/2/search/${encodeURIComponent(value)}.json?key=${TOMTOM_API_KEY}&limit=5&typeahead=true`;
+      const res = await fetch(endpoint);
+      const data = await res.json();
+      if (data.results) {
+        setSuggestions(data.results);
+      } else {
+        setSuggestions([]);
+      }
+    } catch (err) {
+      setSuggestions([]);
+    }
+  };
+
+  const handleSuggestionClick = (suggestion) => {
+    setSearch(suggestion.address.freeformAddress);
+    setSuggestions([]);
+    if (mapInstance.current && suggestion.position) {
+      mapInstance.current.flyTo({
+        center: [suggestion.position.lon, suggestion.position.lat],
+        zoom: 14,
+        essential: true,
+      });
+    }
+  };
+
+  // Route simulation function
+  const simulateRoute = () => {
+    if (!routeGeoJson || !routeGeoJson.geometry || !routeGeoJson.geometry.coordinates) {
+      alert('Please calculate a route first');
+      return;
+    }
+
+    if (isSimulating) {
+      // Stop simulation
+      setIsSimulating(false);
+      setSimulationProgress(0);
+      if (simulationIntervalRef.current) {
+        clearInterval(simulationIntervalRef.current);
+        simulationIntervalRef.current = null;
+      }
+      if (simulationMarkerRef.current) {
+        simulationMarkerRef.current.remove();
+        simulationMarkerRef.current = null;
+      }
+      return;
+    }
+
+    // Start simulation
+    setIsSimulating(true);
+    setSimulationProgress(0);
+
+    const coordinates = routeGeoJson.geometry.coordinates;
+    if (coordinates.length === 0) return;
+
+    // Create vehicle marker element
+    const vehicleEl = document.createElement('div');
+    vehicleEl.style.width = '30px';
+    vehicleEl.style.height = '30px';
+    vehicleEl.style.backgroundImage = isEnterpriseMode 
+      ? 'url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' viewBox=\'0 0 24 24\' fill=\'%2328a745\'%3E%3Cpath d=\'M20 8h-3V4H3c-1.1 0-2 .9-2 2v11h2c0 1.66 1.34 3 3 3s3-1.34 3-3h6c0 1.66 1.34 3 3 3s3-1.34 3-3h2v-5l-3-4zM6 18.5c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm13.5-9l1.96 2.5H17V9.5h2.5zm-1.5 9c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5z\'/%3E%3C/svg%3E")'
+      : 'url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' viewBox=\'0 0 24 24\' fill=\'%230078d7\'%3E%3Cpath d=\'M18.92 6.01C18.72 5.42 18.16 5 17.5 5h-11c-.66 0-1.22.42-1.42 1.01L3 12v8c0 .55.45 1 1 1h1c.55 0 1-.45 1-1v-1h12v1c0 .55.45 1 1 1h1c.55 0 1-.45 1-1v-8l-2.08-5.99zM6.5 16c-.83 0-1.5-.67-1.5-1.5S5.67 13 6.5 13s1.5.67 1.5 1.5S7.33 16 6.5 16zm11 0c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zM5 11l1.5-4.5h11L19 11H5z\'/%3E%3C/svg%3E")';
+    vehicleEl.style.backgroundSize = 'contain';
+    vehicleEl.style.backgroundRepeat = 'no-repeat';
+    vehicleEl.style.backgroundPosition = 'center';
+    vehicleEl.style.borderRadius = '50%';
+    vehicleEl.style.backgroundColor = 'white';
+    vehicleEl.style.border = '2px solid #333';
+    vehicleEl.style.boxShadow = '0 2px 4px rgba(0,0,0,0.3)';
+
+    // Create marker
+    simulationMarkerRef.current = new maplibregl.Marker({
+      element: vehicleEl,
+      anchor: 'center'
+    })
+    .setLngLat(coordinates[0])
+    .addTo(mapInstance.current);
+
+    let currentIndex = 0;
+    const totalSteps = coordinates.length;
+    const stepDuration = Math.max(50, 3000 / totalSteps); // Adjust speed based on route length
+
+    simulationIntervalRef.current = setInterval(() => {
+      if (currentIndex >= coordinates.length - 1) {
+        // Animation complete
+        setIsSimulating(false);
+        setSimulationProgress(100);
+        clearInterval(simulationIntervalRef.current);
+        simulationIntervalRef.current = null;
+        
+        // Keep marker visible for 2 seconds then remove
+        setTimeout(() => {
+          if (simulationMarkerRef.current) {
+            simulationMarkerRef.current.remove();
+            simulationMarkerRef.current = null;
+          }
+          setSimulationProgress(0);
+        }, 2000);
+        return;
+      }
+
+      currentIndex++;
+      const progress = Math.round((currentIndex / (totalSteps - 1)) * 100);
+      setSimulationProgress(progress);
+
+      // Move marker to next position
+      if (simulationMarkerRef.current) {
+        simulationMarkerRef.current.setLngLat(coordinates[currentIndex]);
+      }
+
+      // Auto-follow the vehicle (optional - you can comment this out if you don't want auto-follow)
+      if (mapInstance.current && currentIndex % 5 === 0) { // Only update view every 5 steps for smooth performance
+        mapInstance.current.easeTo({
+          center: coordinates[currentIndex],
+          duration: stepDuration
+        });
+      }
+    }, stepDuration);
+  };
+
+  // Recenter to user location
+  const handleRecenter = () => {
+    if (userLocation && mapInstance.current) {
+      mapInstance.current.flyTo({ center: userLocation, zoom: 14, essential: true });
+      setShowUserArrow(true);
+      setTimeout(() => setShowUserArrow(false), 3000); // Hide arrow after 3 seconds
+    }
+  };
+
+  // Draw points, route, and traffic
+  useEffect(() => {
+    if (!mapInstance.current) return;
+    // Remove old markers
+    if (mapInstance.current._pointMarkers) {
+      mapInstance.current._pointMarkers.forEach(m => m.remove());
+    }
+    mapInstance.current._pointMarkers = [];
+    points.forEach((lngLat, idx) => {
+      const marker = new maplibregl.Marker({ color: idx === 0 ? 'green' : 'blue' })
+        .setLngLat(lngLat)
+        .addTo(mapInstance.current);
+      mapInstance.current._pointMarkers.push(marker);
+    });
+    // Add blue dot at user location if requested
+    if (showUserArrow && userLocation) {
+      const el = document.createElement('div');
+      el.className = 'user-location-marker';
+      const dotMarker = new maplibregl.Marker({ element: el, anchor: 'center' })
+        .setLngLat(userLocation)
+        .addTo(mapInstance.current);
+      mapInstance.current._pointMarkers.push(dotMarker);
+    }
+    // Draw route if available
+    if (routeGeoJson) {
+      if (mapInstance.current.getSource('route')) {
+        mapInstance.current.removeLayer('route');
+        mapInstance.current.removeSource('route');
+      }
+      mapInstance.current.addSource('route', {
+        type: 'geojson',
+        data: routeGeoJson,
+      });
+      mapInstance.current.addLayer({
+        id: 'route',
+        type: 'line',
+        source: 'route',
+        paint: {
+          'line-color': '#ff6600',
+          'line-width': 4,
+        },
+      });
+    } else {
+      // Remove route layer if routeGeoJson is null
+      if (mapInstance.current && mapInstance.current.getSource('route')) {
+        mapInstance.current.removeLayer('route');
+        mapInstance.current.removeSource('route');
+      }
+    }
+    // Traffic Layer
+    if (showTraffic && mapInstance.current.getZoom() >= 12) {
+      if (!mapInstance.current.getSource('traffic')) {
+        mapInstance.current.addSource('traffic', {
+          type: 'raster',
+          tiles: [
+            `https://api.tomtom.com/traffic/map/4/tile/flow/relative0/{z}/{x}/{y}.png?key=${TOMTOM_API_KEY}`
+          ],
+          tileSize: 256,
+          attribution: '© TomTom Traffic',
+        });
+        mapInstance.current.addLayer({
+          id: 'traffic',
+          type: 'raster',
+          source: 'traffic',
+          minzoom: 0,
+          maxzoom: 22,
+          paint: { 'raster-opacity': 0.7 },
+        });
+      }
+    } else {
+      if (mapInstance.current.getLayer('traffic')) {
+        mapInstance.current.removeLayer('traffic');
+      }
+      if (mapInstance.current.getSource('traffic')) {
+        mapInstance.current.removeSource('traffic');
+      }
+    }
+  }, [points, routeGeoJson, showUserArrow, userLocation, showTraffic]);
+
+  // Calculate route
+  // Route calculation for planner with fuel logic
+  const handlePlannerRoute = async () => {
+    const coords = routeInputs.map(f => f.coords).filter(Boolean);
+    if (coords.length < 2) return;
+    setRouteInstructions([]);
+    
+    // Enterprise Mode: Optimized routing for commercial delivery
+    if (isEnterpriseMode) {
+      const locations = coords.map(p => `${p[1]},${p[0]}`).join(':');
+      // Simplified truck routing - using basic parameters that are widely supported
+      const url = `https://api.tomtom.com/routing/1/calculateRoute/${locations}/json?key=${TOMTOM_API_KEY}&computeBestOrder=true&routeType=shortest&travelMode=truck&traffic=true&vehicleCommercial=true`;
+      try {
+        const res = await fetch(url);
+        const data = await res.json();
+        if (data.routes && data.routes[0] && data.routes[0].legs) {
+          const pointsArr = data.routes[0].legs.flatMap(leg => leg.points.map(pt => [pt.longitude, pt.latitude]));
+          setRouteGeoJson({
+            type: 'Feature',
+            geometry: { type: 'LineString', coordinates: pointsArr },
+          });
+          
+          // Use optimized order if available
+          const optimizedWaypoints = data.routes[0].optimizedWaypoints || coords;
+          setPoints(optimizedWaypoints);
+          setPlannerOpen(false);
+          
+          // Extract route summary for enterprise
+          if (data.routes[0].summary) {
+            const distanceKm = data.routes[0].summary.lengthInMeters / 1000;
+            const timeSeconds = data.routes[0].summary.travelTimeInSeconds;
+            const hours = Math.floor(timeSeconds / 3600);
+            const minutes = Math.floor((timeSeconds % 3600) / 60);
+            setRouteSummary({
+              distance: distanceKm.toFixed(1) + ' km',
+              time: hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`,
+              isEnterprise: true,
+              truckSpecs: truckSpecs
+            });
+          }
+          
+          // Collect enterprise instructions with delivery order
+          const instructions = [];
+          data.routes[0].legs.forEach((leg, legIdx) => {
+            instructions.push({ 
+              street: 'Delivery Stop', 
+              message: `Stop ${legIdx + 1}: Delivery point ${legIdx === 0 ? '(Start)' : legIdx}`
+            });
+            if (leg.instructions) {
+              leg.instructions.forEach(instr => {
+                instructions.push({
+                  street: instr.roadNumbers && instr.roadNumbers.length ? instr.roadNumbers.join(', ') : instr.street || '',
+                  message: instr.message || '',
+                });
+              });
+            }
+          });
+          setRouteInstructions(instructions);
+        }
+      } catch (err) {
+        setRouteGeoJson(null);
+        setRouteSummary(null);
+      }
+      return;
+    }
+    
+    // Only apply fuel logic for car/truck
+    if ((mode === 'car' || mode === 'truck') && fuelCapacity && mileage && currentFuel) {
+      const maxDistance = parseFloat(mileage) * parseFloat(currentFuel); // in km
+      let waypoints = [...coords];
+      let done = false;
+      let currentWaypoints = [coords[0]];
+      let remaining = coords.slice(1);
+      let fuelStops = [];
+      let lastIdx = 0;
+      while (!done) {
+        const testWaypoints = [...currentWaypoints, ...remaining];
+        const locations = testWaypoints.map(p => `${p[1]},${p[0]}`).join(':');
+        const url = `https://api.tomtom.com/routing/1/calculateRoute/${locations}/json?key=${TOMTOM_API_KEY}&routeType=fastest&travelMode=${mode}&traffic=false`;
+        try {
+          const res = await fetch(url);
+          const data = await res.json();
+          if (!(data.routes && data.routes[0] && data.routes[0].legs)) break;
+          let traveled = 0;
+          let needStop = false;
+          let fuelStopCoord = null;
+          let foundIdx = null;
+          for (let legIdx = 0; legIdx < data.routes[0].legs.length; legIdx++) {
+            const leg = data.routes[0].legs[legIdx];
+            for (let i = 1; i < leg.points.length; i++) {
+              const prev = leg.points[i - 1];
+              const curr = leg.points[i];
+              const dx = curr.latitude - prev.latitude;
+              const dy = curr.longitude - prev.longitude;
+              const dist = Math.sqrt(dx * dx + dy * dy) * 111;
+              traveled += dist;
+              if (traveled >= maxDistance) {
+                fuelStopCoord = [curr.longitude, curr.latitude];
+                foundIdx = legIdx + 1;
+                needStop = true;
+                break;
+              }
+            }
+            if (needStop) break;
+          }
+          if (needStop && fuelStopCoord) {
+            // Find nearest fuel station to this point
+            const fuelUrl = `https://api.tomtom.com/search/2/poiSearch/fuel.json?lat=${fuelStopCoord[1]}&lon=${fuelStopCoord[0]}&radius=10000&key=${TOMTOM_API_KEY}&limit=1`;
+            const fuelRes = await fetch(fuelUrl);
+            const fuelData = await fuelRes.json();
+            if (fuelData.results && fuelData.results[0] && fuelData.results[0].position) {
+              const fuelStation = [fuelData.results[0].position.lon, fuelData.results[0].position.lat];
+              currentWaypoints.push(fuelStation);
+              fuelStops.push(fuelStation);
+              // recalculate with new fuel stop
+              continue;
+            } else {
+              // No fuel station found, break
+              break;
+            }
+          } else {
+            // No more stops needed, finish
+            done = true;
+            waypoints = [...currentWaypoints, ...remaining];
+          }
+        } catch {
+          break;
+        }
+      }
+      // Final route calculation with all fuel stops
+      const finalLocations = waypoints.map(p => `${p[1]},${p[0]}`).join(':');
+      const finalUrl = `https://api.tomtom.com/routing/1/calculateRoute/${finalLocations}/json?key=${TOMTOM_API_KEY}&routeType=fastest&travelMode=${mode}&traffic=false`;
+      try {
+        const finalRes = await fetch(finalUrl);
+        const finalData = await finalRes.json();
+        if (finalData.routes && finalData.routes[0] && finalData.routes[0].legs) {
+          const pointsArr = finalData.routes[0].legs.flatMap(leg => leg.points.map(pt => [pt.longitude, pt.latitude]));
+          setRouteGeoJson({
+            type: 'Feature',
+            geometry: { type: 'LineString', coordinates: pointsArr },
+          });
+          setPoints(waypoints);
+          setPlannerOpen(false);
+          
+          // Extract route summary
+          if (finalData.routes[0].summary) {
+            const distanceKm = finalData.routes[0].summary.lengthInMeters / 1000;
+            const timeSeconds = finalData.routes[0].summary.travelTimeInSeconds;
+            const hours = Math.floor(timeSeconds / 3600);
+            const minutes = Math.floor((timeSeconds % 3600) / 60);
+            setRouteSummary({
+              distance: distanceKm.toFixed(1) + ' km',
+              time: hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`
+            });
+          }
+          
+          // Collect instructions
+          const instructions = [];
+          finalData.routes[0].legs.forEach((leg, legIdx) => {
+            if (fuelStops.length && fuelStops.find(stop => Math.abs(leg.points[leg.points.length-1].longitude - stop[0]) < 0.001 && Math.abs(leg.points[leg.points.length-1].latitude - stop[1]) < 0.001)) {
+              instructions.push({ street: 'Fuel Stop', message: 'Refuel here' });
+            }
+            if (leg.instructions) {
+              leg.instructions.forEach(instr => {
+                instructions.push({
+                  street: instr.roadNumbers && instr.roadNumbers.length ? instr.roadNumbers.join(', ') : instr.street || '',
+                  message: instr.message || '',
+                });
+              });
+            }
+          });
+          setRouteInstructions(instructions);
+        }
+      } catch {
+        setRouteGeoJson(null);
+        setRouteSummary(null);
+      }
+      return;
+    }
+    // Default: no fuel logic
+    const locations = coords.map(p => `${p[1]},${p[0]}`).join(':');
+    const url = `https://api.tomtom.com/routing/1/calculateRoute/${locations}/json?key=${TOMTOM_API_KEY}&computeBestOrder=true&routeType=fastest&travelMode=${mode}&traffic=false`;
+    try {
+      const res = await fetch(url);
+      const data = await res.json();
+      if (data.routes && data.routes[0] && data.routes[0].legs) {
+        const pointsArr = data.routes[0].legs.flatMap(leg => leg.points.map(pt => [pt.longitude, pt.latitude]));
+        setRouteGeoJson({
+          type: 'Feature',
+          geometry: { type: 'LineString', coordinates: pointsArr },
+        });
+        setPoints(coords);
+        setPlannerOpen(false);
+        
+        // Extract route summary
+        if (data.routes[0].summary) {
+          const distanceKm = data.routes[0].summary.lengthInMeters / 1000;
+          const timeSeconds = data.routes[0].summary.travelTimeInSeconds;
+          const hours = Math.floor(timeSeconds / 3600);
+          const minutes = Math.floor((timeSeconds % 3600) / 60);
+          setRouteSummary({
+            distance: distanceKm.toFixed(1) + ' km',
+            time: hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`
+          });
+        }
+        
+        // Collect instructions
+        const instructions = [];
+        data.routes[0].legs.forEach((leg, legIdx) => {
+          if (leg.instructions) {
+            leg.instructions.forEach(instr => {
+              instructions.push({
+                street: instr.roadNumbers && instr.roadNumbers.length ? instr.roadNumbers.join(', ') : instr.street || '',
+                message: instr.message || '',
+              });
+            });
+          }
+        });
+        setRouteInstructions(instructions);
+      }
+    } catch (err) {
+      setRouteGeoJson(null);
+      setRouteSummary(null);
+    }
+  };
+
+  return (
+    <div className="map-container">
+      {/* Route Instructions at Bottom */}
+      {routeInstructions.length > 0 && (
+        <div className="route-instructions-panel">
+          <div className="instructions-title">Route Instructions</div>
+          <ol className="instructions-list">
+            {routeInstructions.map((step, i) => (
+              <li key={i} className="instruction-step">
+                <span className="instruction-street">{step.street ? `${step.street}: ` : ''}</span>
+                {step.message}
+              </li>
+            ))}
+          </ol>
+        </div>
+      )}
+      
+      {/* Route Summary at Bottom Left */}
+      {routeSummary && (
+        <div className="route-summary-panel" style={{ bottom: routeInstructions.length > 0 ? 250 : 24 }}>
+          <div className="summary-header">
+            <div className={`summary-title ${routeSummary.isEnterprise ? 'enterprise' : ''}`}>
+              {routeSummary.isEnterprise ? '🚛 Enterprise Route' : 'Route Summary'}
+            </div>
+            <div className="summary-actions">
+              <button
+                onClick={simulateRoute}
+                className={`summary-clear-btn ${isSimulating ? 'active' : ''}`}
+                style={{ 
+                  backgroundColor: isSimulating ? '#dc3545' : '#28a745',
+                  minWidth: '80px'
+                }}
+                title={isSimulating ? 'Stop simulation' : 'Start route simulation'}
+              >
+                {isSimulating ? `Stop (${simulationProgress}%)` : 'Simulate'}
+              </button>
+              <button
+                onClick={() => {
+                  if (mapInstance.current && mapInstance.current.getSource('route')) {
+                    mapInstance.current.removeLayer('route');
+                    mapInstance.current.removeSource('route');
+                  }
+                  setRouteGeoJson(null);
+                  setRouteSummary(null);
+                  setRouteInstructions([]);
+                  setPoints([]);
+                  // Clean up simulation
+                  if (simulationIntervalRef.current) {
+                    clearInterval(simulationIntervalRef.current);
+                    simulationIntervalRef.current = null;
+                  }
+                  if (simulationMarkerRef.current) {
+                    simulationMarkerRef.current.remove();
+                    simulationMarkerRef.current = null;
+                  }
+                  setIsSimulating(false);
+                  setSimulationProgress(0);
+                }}
+                className="summary-clear-btn"
+                title="Clear route"
+              >
+                Clear
+              </button>
+              <button
+                onClick={() => setRouteSummary(null)}
+                className="summary-close-btn"
+                title="Close summary"
+              >
+                ×
+              </button>
+            </div>
+          </div>
+          <div className="summary-details">
+            <div><strong>Distance:</strong> <span className={routeSummary.isEnterprise ? 'enterprise-text' : 'primary-text'}>{routeSummary.distance}</span></div>
+            <div><strong>Time:</strong> <span className={routeSummary.isEnterprise ? 'enterprise-text' : 'primary-text'}>{routeSummary.time}</span></div>
+          </div>
+          {routeSummary.isEnterprise && (
+            <div className="enterprise-details">
+              <div className="enterprise-checkmark">✓ Truck-legal route with vehicle restrictions</div>
+              {routeSummary.truckSpecs && (
+                <div className="truck-specs">
+                  Vehicle: {routeSummary.truckSpecs.weight}kg, {routeSummary.truckSpecs.height}m H, {routeSummary.truckSpecs.width}m W, {routeSummary.truckSpecs.length}m L
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+      
+      {/* Floating Search Bar for Map Panning */}
+      <div className="search-bar-container">
+        <input
+          type="text"
+          value={search}
+          onChange={handleSearchChange}
+          onFocus={() => setIsFocused(true)}
+          onBlur={() => setTimeout(() => setIsFocused(false), 200)}
+          placeholder="Search for a place..."
+          className="search-input"
+        />
+        {isFocused && suggestions.length > 0 && (
+          <ul className="suggestions-list">
+            {suggestions.map((s, i) => (
+              <li
+                key={s.id || i}
+                onMouseDown={() => handleSuggestionClick(s)}
+                className="suggestion-item"
+              >
+                {s.address.freeformAddress}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+      <div className="planner-container">
+        <button
+          onClick={() => setPlannerOpen((v) => !v)}
+          className="planner-toggle-btn"
+        >
+          {plannerOpen ? 'Close Route Planner' : 'Open Route Planner'}
+        </button>
+        {plannerOpen && (
+          <div className="planner-panel">
+            <div className="planner-title">Route Planner</div>
+            {routeInputs.map((input, idx) => (
+              <div key={idx} className="route-input-group">
+                <input
+                  type="text"
+                  value={input.value}
+                  onChange={e => handleRouteInputChange(idx, e.target.value)}
+                  placeholder={idx === 0 ? 'Start location' : `Destination ${idx}`}
+                  className="route-input"
+                />
+                <button
+                  onClick={() => setPickIndex(idx)}
+                  className={`pick-btn ${pickIndex === idx ? 'picking' : ''}`}
+                  title="Pick on map"
+                >
+                  {pickIndex === idx ? 'Click…' : 'Pick'}
+                </button>
+                {input.suggestions && input.suggestions.length > 0 && (
+                  <ul className="route-suggestions-list">
+                    {input.suggestions.map((s, i) => (
+                      <li
+                        key={s.id || i}
+                        onMouseDown={() => handleRouteSuggestionClick(idx, s)}
+                        className="route-suggestion-item"
+                      >
+                        {s.address.freeformAddress}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {idx > 1 && (
+                  <button onClick={() => handleRemoveDestination(idx)} className="remove-btn" title="Remove destination">×</button>
+                )}
+              </div>
+            ))}
+            <button onClick={handleAddDestination} className="add-destination-btn">+ Add Destination</button>
+            
+            {/* Enterprise Mode Toggle */}
+            <div className={`enterprise-mode-toggle-container ${isEnterpriseMode ? 'active' : ''}`}>
+              <label className="enterprise-mode-label">
+                <input
+                  type="checkbox"
+                  checked={isEnterpriseMode}
+                  onChange={e => setIsEnterpriseMode(e.target.checked)}
+                  className="enterprise-mode-checkbox"
+                />
+                <span className="enterprise-mode-text">
+                  🚛 Enterprise Delivery Mode
+                </span>
+              </label>
+              {isEnterpriseMode && (
+                <>
+                  <div className="enterprise-description">
+                    Optimized routing for commercial delivery vehicles. Routes consider truck restrictions, bridge heights, and legal truck roads.
+                  </div>
+                  
+                  {/* Truck Specifications */}
+                  <div className="truck-specs-container">
+                    <div className="specs-title">Vehicle Specifications:</div>
+                    <div className="specs-grid">
+                      <input type="number" min="0" step="0.1" value={truckSpecs.weight} onChange={e => setTruckSpecs(prev => ({ ...prev, weight: e.target.value }))} placeholder="Weight (kg)" className="spec-input"/>
+                      <input type="number" min="0" step="0.1" value={truckSpecs.height} onChange={e => setTruckSpecs(prev => ({ ...prev, height: e.target.value }))} placeholder="Height (m)" className="spec-input"/>
+                      <input type="number" min="0" step="0.1" value={truckSpecs.width} onChange={e => setTruckSpecs(prev => ({ ...prev, width: e.target.value }))} placeholder="Width (m)" className="spec-input"/>
+                      <input type="number" min="0" step="0.1" value={truckSpecs.length} onChange={e => setTruckSpecs(prev => ({ ...prev, length: e.target.value }))} placeholder="Length (m)" className="spec-input"/>
+                    </div>
+                    <div className="specs-note">
+                      Default: 15t truck, 4.0m height, 2.5m width, 12m length
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+            
+            {!isEnterpriseMode && (
+              <div className="mode-selection">
+                <label className="mode-label">Mode:</label>
+                <select value={mode} onChange={e => setMode(e.target.value)} className="mode-select">
+                  <option value="car">Car</option>
+                  <option value="truck">Truck</option>
+                  <option value="pedestrian">Pedestrian</option>
+                  <option value="bicycle">Bicycle</option>
+                </select>
+              </div>
+            )}
+            
+            {!isEnterpriseMode && (mode === 'car' || mode === 'truck') && (
+              <div className="fuel-inputs">
+                <input type="number" min="0" value={fuelCapacity} onChange={e => setFuelCapacity(e.target.value)} placeholder="Capacity (L)" className="fuel-input"/>
+                <input type="number" min="0" value={mileage} onChange={e => setMileage(e.target.value)} placeholder="km/L" className="fuel-input"/>
+                <input type="number" min="0" value={currentFuel} onChange={e => setCurrentFuel(e.target.value)} placeholder="Current (L)" className="fuel-input"/>
+              </div>
+            )}
+            <button onClick={handlePlannerRoute} className="calculate-btn" disabled={routeInputs.filter(f => f.coords).length < 2}>
+              Calculate Route
+            </button>
+          </div>
+        )}
+      </div>
+      {/* Map container */}
+      <div ref={mapContainer} className="map-canvas"/>
+      {/* Traffic toggle button */}
+      {userLocation && (
+        <button
+          onClick={() => setShowTraffic((v) => !v)}
+          className={`traffic-toggle-btn ${showTraffic ? 'active' : ''}`}
+          title="Toggle traffic layer (visible when zoomed in)"
+        >
+          🚦
+        </button>
+      )}
+      {/* Recenter button */}
+      {userLocation && (
+        <button
+          onClick={handleRecenter}
+          className="recenter-btn"
+          title="Recenter to your location"
+        >
+          ⦿
+        </button>
+      )}
+    </div>
+  );
+};
+
+export default TomTomMap;
