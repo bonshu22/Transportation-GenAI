@@ -4,7 +4,38 @@ import 'maplibre-gl/dist/maplibre-gl.css';
 import './TomTomMap.css';
 import AISuggestionPopup from './AISuggestionPopup';
 
-const TOMTOM_API_KEY = process.env.REACT_APP_TOMTOM_API_KEY;
+const TOMTOM_API_KEY = (process.env.REACT_APP_TOMTOM_API_KEY || '').trim();
+const HAS_TOMTOM_KEY = Boolean(TOMTOM_API_KEY);
+
+const createMapStyle = () => {
+  if (HAS_TOMTOM_KEY) {
+    return {
+      version: 8,
+      sources: {
+        tomtom: {
+          type: 'raster',
+          tiles: [`https://api.tomtom.com/map/1/tile/basic/main/{z}/{x}/{y}.png?key=${TOMTOM_API_KEY}`],
+          tileSize: 256,
+          attribution: '© TomTom',
+        },
+      },
+      layers: [{ id: 'tomtom-tiles', type: 'raster', source: 'tomtom', minzoom: 0, maxzoom: 22 }],
+    };
+  }
+
+  return {
+    version: 8,
+    sources: {
+      osm: {
+        type: 'raster',
+        tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+        tileSize: 256,
+        attribution: '© OpenStreetMap contributors',
+      },
+    },
+    layers: [{ id: 'osm-tiles', type: 'raster', source: 'osm', minzoom: 0, maxzoom: 22 }],
+  };
+};
 
 const TomTomMap = () => {
   const [pickIndex, setPickIndex] = useState(null);
@@ -13,6 +44,7 @@ const TomTomMap = () => {
   const [search, setSearch] = useState('');
   const [suggestions, setSuggestions] = useState([]);
   const [isFocused, setIsFocused] = useState(false);
+  const [mapStatus, setMapStatus] = useState('');
   
   // Route planner panel state
   const [plannerOpen, setPlannerOpen] = useState(false);
@@ -192,37 +224,24 @@ const TomTomMap = () => {
     const initializeMap = (center) => {
       const map = new maplibregl.Map({
         container: mapContainer.current,
-        style: {
-          version: 8,
-          sources: {
-            tomtom: {
-              type: 'raster',
-              tiles: [
-                `https://api.tomtom.com/map/1/tile/basic/main/{z}/{x}/{y}.png?key=${TOMTOM_API_KEY}`
-              ],
-              tileSize: 256,
-              attribution: '© TomTom',
-            },
-          },
-          layers: [
-            {
-              id: 'tomtom-tiles',
-              type: 'raster',
-              source: 'tomtom',
-              minzoom: 0,
-              maxzoom: 22,
-            },
-          ],
-        },
+        style: createMapStyle(),
         center,
         zoom: 10,
       });
 
-      map.on('error', (e) => {
-        console.error('MapLibre error:', e);
+      map.on('load', () => {
+        if (!HAS_TOMTOM_KEY) {
+          setMapStatus('TomTom key missing — showing OpenStreetMap fallback.');
+        } else {
+          setMapStatus('');
+        }
       });
 
-      // Initialize marker array
+      map.on('error', (e) => {
+        console.error('MapLibre error:', e);
+        setMapStatus('Map could not load the tile layer.');
+      });
+
       map._pointMarkers = [];
       mapInstance.current = map;
     };
@@ -900,6 +919,10 @@ const TomTomMap = () => {
         </div>
       )}
       
+      {mapStatus && (
+        <div className="map-status-banner">{mapStatus}</div>
+      )}
+
       {/* Route Summary at Bottom Left */}
       {routeSummary && (
         <div className="route-summary-panel" style={{ bottom: routeInstructions.length > 0 ? 250 : 24 }}>
