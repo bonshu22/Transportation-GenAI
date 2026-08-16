@@ -14,6 +14,22 @@
   background: #e9eef6;
 }
 
+.map-status-banner {
+  position: absolute;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 30;
+  background: rgba(0, 0, 0, 0.75);
+  color: white;
+  padding: 8px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: center;
+  pointer-events: none;
+}
+
 /* Route Options Panel */
 .route-options-panel {
   position: absolute;
